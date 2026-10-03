@@ -6,7 +6,7 @@
 #   bash run.sh retrieval     # 终端 A：起检索服务（FastAPI，:8000）
 #   bash run.sh judge          # 终端 B：起远程 Judge（vLLM openai 协议，:8001）
 #   bash run.sh train          # 终端 C：起 veRL 训练（6×RTX 4090）
-#   bash run.sh eval           # 跑 500 题冻结评测（eval_hard_500.jsonl）
+#   bash run.sh eval           # 跑 48 题多跳验证集评测（eval_val_48.jsonl）
 #   bash run.sh all            # 打印「分别开 3 个终端」的标准启动说明（默认演示）
 #   bash run.sh install        # 调用 scripts/install_autodl.sh 装环境
 #   bash run.sh model          # 调用 scripts/download_model.sh 下模型
@@ -34,7 +34,7 @@ case "$cmd" in
         exec bash scripts/train.sh "${@:2}"
         ;;
     eval)
-        echo "[run.sh] 运行 500 题评测..."
+        echo "[run.sh] 运行 48 题多跳验证集评测..."
         exec python -m deepsearch_rl.eval.evaluate "${@:2}"
         ;;
     install)
@@ -67,7 +67,7 @@ DeepSearch-RL 标准启动流程（请分别在 3 个终端里执行，不要合
     #   bash run.sh train data.train_batch_size=128 actor_rollout_ref.rollout.n=5
 
   [训练结束后]
-    bash run.sh eval                     # 在冻结 500 题上评测
+    bash run.sh eval                     # 在 48 题多跳验证集上离线评测
 
 子命令：retrieval | judge | train | eval | install | model | all
 EOF

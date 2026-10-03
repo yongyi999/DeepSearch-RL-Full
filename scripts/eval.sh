@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-# DeepSearch-RL 500 题冻结评测启动脚本（Ubuntu + bash）
+# DeepSearch-RL 多跳搜索验证集评测启动脚本（Ubuntu + bash）
 #
 # 环境变量（均可覆盖默认值）：
 #   MODEL_ENDPOINT   被评模型 SGLang/vLLM OpenAI 端点（默认 http://127.0.0.1:30000/v1）
 #   MODEL_NAME       被评模型 served-model-name（默认 default）
-#   JUDGE_BASE_URL   Judge 服务端点（默认 http://127.0.0.1:8001/v1）
-#   JUDGE_MODEL      Judge 模型名（默认 judge）
+#   JUDGE_BASE_URL   Judge 服务端点（默认 https://api.deepseek.com/v1）
+#   JUDGE_MODEL      Judge 模型名（默认 deepseek-chat）
 #   SEARCH_BACKEND   搜索后端。默认 free：quark/so_m/shenma/sogou_wx/toutiao 依次切换
 #
 # 用法：
-#   bash scripts/eval.sh                       # 全量 500 题
+#   bash scripts/eval.sh                       # 全量 48 题验证集
 #   bash scripts/eval.sh --limit 20             # 只跑前 20 题（调试）
 #   MODEL_ENDPOINT=http://10.0.0.1:30000/v1 bash scripts/eval.sh
 #   bash scripts/eval.sh --compare outputs/eval/metrics_baseline.json outputs/eval/metrics_trained.json

@@ -353,7 +353,34 @@ def build_fast_dataset(raw_dir: str, out_dir: str, seed: int = 42) -> Dict[str, 
     rng.shuffle(train_raw)
     train_out = [record_to_parquet_row(r, split="train", index=i) for i, r in enumerate(train_raw)]
     val_out = [record_to_parquet_row(r, split="val", index=i) for i, r in enumerate(val_raw)]
-    return _write_source_shards(train_out, val_out, out_dir, sources=FAST_SOURCES)
+    stats = _write_source_shards(train_out, val_out, out_dir, sources=FAST_SOURCES)
+
+    # 同时把 48 题验证集导出为离线评测用 jsonl：data/eval_val_48.jsonl
+    export_val_jsonl(val_out)
+    return stats
+
+
+def export_val_jsonl(val_out: List[Dict[str, Any]],
+                     path: Optional[str] = None) -> str:
+    """把 fast 验证 parquet 行导出为离线评测 jsonl（默认 data/eval_val_48.jsonl）。"""
+    if path is None:
+        path = os.path.join(_PROJECT_ROOT, "data", "eval_val_48.jsonl")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for row in val_out:
+            ei = row["extra_info"]
+            rec = {
+                "id": f"{row['data_source']}_val_{int(ei['index']):03d}",
+                "source": row["data_source"],
+                "question": ei.get("question"),
+                "gold_answers": list(row["reward_model"]["ground_truth"]["target"]),
+                "num_hops": int(ei.get("num_hops", 0) or 0),
+                "supporting_titles": list(ei.get("supporting_titles") or []),
+                "split": "val",
+            }
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    print(f"[export] 48 题验证集 -> {path}")
+    return path
 
 
 def main(argv: Optional[List[str]] = None) -> int:

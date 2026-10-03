@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-500 题冻结评测子模块
-======================
+多跳搜索验证集评测子模块
+========================
 
-对齐 ENGINEERING_SPEC 4.2 / 第 7 节，对被评模型（SGLang/vLLM OpenAI 端点）在
-``data/eval_hard_500.jsonl``（HotpotQA 150 + 2Wiki 125 + MuSiQue 100 + Bamboogle 125）
-上做离线多轮检索评测，输出与简历口径一致的 5 个核心指标：
+对被评模型（SGLang/vLLM OpenAI 端点）在 ``data/eval_val_48.jsonl``——实验实际
+使用的 48 题多跳验证集（HotpotQA 20 + 2WikiMultihopQA 16 + MuSiQue 12，与
+``data/processed/fast/val`` 对应，seed=42）——上做离线多轮检索评测，输出核心指标：
 
 - Accuracy             = mean(answer_correct)
 - Evidence Sufficiency = mean(evidence_sufficiency)

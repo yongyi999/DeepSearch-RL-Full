@@ -1,6 +1,6 @@
 # data/ 数据目录说明
 
-DeepSearch-RL 的数据下载、统一中间格式、训练 parquet 与 500 题冻结评测集均在本目录生成。
+DeepSearch-RL 的数据下载、统一中间格式、训练 parquet 与 48 题多跳验证集均在本目录生成。
 
 ## 1. 数据源
 
@@ -30,7 +30,7 @@ DeepSearch-RL 的数据下载、统一中间格式、训练 parquet 与 500 题�
 }
 ```
 
-> MuSiQue 行额外带 `answerable: bool`，供 500 题评测按 answerable 过滤。
+> MuSiQue 行额外带 `answerable: bool`，供验证集按 answerable 过滤。
 
 答案归一规则：HotpotQA `[answer]`；NQ-open 直接用 `answer` 列表；MuSiQue `[answer] + answer_aliases`；2Wiki `[answer]`；Bamboogle 用 `golden_answers`。
 
@@ -57,24 +57,27 @@ DeepSearch-RL 的数据下载、统一中间格式、训练 parquet 与 500 题�
 - 从每个 train 源固定抽 200 条做训练期 val（seed=42）。
 - 输出 shard：`data/processed/train/{source}.parquet`、`data/processed/val/{source}.parquet`。
 
-## 4. 500 题冻结评测集（build_eval_500.py 产出 `data/eval_hard_500.jsonl`）
+## 4. 48 题多跳验证集（实验实际使用的评测集）
 
-只用各源 validation/dev，seed=42，配额：
+实验在训练过程中用一个固定的小型多跳验证集做周期性评测（veRL `val_before_train=True`、`test_freq=3`）。
+它由 `prepare_train.py --fast` 生成到 `data/processed/fast/val/`，只取各源 train 中难多跳样本，
+与同目录 `fast/train/` 按 id 不重叠（seed=42）：
 
-| 来源 split                  | 配额 | 筛选条件                          |
-|----------------------------|-----:|-----------------------------------|
-| HotpotQA fullwiki validation| 150  | `level==hard`；不足补 `type==comparison` |
-| 2WikiMultihopQA validation  | 125  | 全类型                            |
-| MuSiQue validation          | 100  | `answerable==True`                |
-| Bamboogle（全集）          | 125  | 全收（只有 125）                  |
-| **合计**                   | **500** |                                   |
+| 来源                       | 验证集条数 | 筛选条件                         |
+|----------------------------|-----------:|----------------------------------|
+| HotpotQA fullwiki          | 20         | 优先 `level==hard` / `type==comparison` |
+| 2WikiMultihopQA            | 16         | compositional/comparison/bridge/inference 均衡 |
+| MuSiQue                    | 12         | 优先 3–4 跳、`answerable==True`  |
+| **合计**                   | **48**     | 恰好 1 个 val batch（val_batch_size=48） |
 
-输出字段：`id, source, question, gold_answers, type, level, num_hops, supporting_titles, split`。一次性生成后冻结，勿重抽。
+为支持离线评测，这 48 题同时导出为 `data/eval_val_48.jsonl`，字段：
+`id, source, question, gold_answers, num_hops, supporting_titles, split`，与 `fast/val` 一一对应。
+离线评测入口：`python -m deepsearch_rl.eval.evaluate`（默认即读取该文件）。
 
 ## 5. 命令
 
 ```bash
-# 一键：下载 -> 500 评测集 -> 训练 parquet（建议在 AutoDL 上跑）
+# 一键：下载 -> 全量 parquet -> 快训子集（含 48 题验证集）
 bash scripts/download_data.sh
 
 # 或分步：
@@ -82,11 +85,11 @@ python data/download_data.py --out_dir data/raw \
     --sources nq,hotpotqa,2wiki,musique,bamboogle \
     --nq_limit 30000 --backend auto
 
-python data/build_eval_500.py --raw_dir data/raw \
-    --out data/eval_hard_500.jsonl --seed 42
-
 python data/prepare_train.py --raw_dir data/raw \
     --out_dir data/processed --nq_limit 30000 --seed 42
+
+# 快训子集：data/processed/fast/{train,val}（48 题验证集同时导出为 data/eval_val_48.jsonl）
+python data/prepare_train.py --raw_dir data/raw --fast --seed 42
 ```
 
 模型下载：

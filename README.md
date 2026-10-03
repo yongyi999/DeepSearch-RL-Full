@@ -7,8 +7,10 @@
 **Qwen3-8B · veRL · SGLang · GRPO · Agentic RL**
 
 一个**不 fork veRL**、开箱即用的多轮搜索强化学习工程：模型在 rollout 中通过 `<search>` / `<open>` 自主检索网页，
-以「证据充分度驱动的分层奖励」联合优化答案正确性、证据充分性、格式完整性与工具效率，
-在 500 题冻结 Hard Multi-hop Search 评测集上把 Qwen3-8B 的准确率从 **27.8% 提升到 49.2%**。
+以「证据充分度驱动的分层奖励」联合优化答案正确性、证据充分性、格式完整性与工具效率。
+在实验实际使用的 **48 题 Hard Multi-hop 验证集**（HotpotQA 20 + 2WikiMultihopQA 16 + MuSiQue 12）上，
+Qwen3-8B 的综合奖励（val plateau score）从 **约 0（−0.003）提升到 0.247**，答案得分 r_answer 从 **0.104 提升到 0.260**，
+格式完整率从约 **19% 提升到 98%**，重复工具调用率从 **23.8% 降至 0.5%**。
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12-green.svg)]()
@@ -23,7 +25,7 @@
 
 - [一、项目简介](#一项目简介)
 - [二、核心特性](#二核心特性)
-- [三、效果指标（复现口径）](#三效果指标复现口径)
+- [三、效果指标（实验实测）](#三效果指标实验实测)
 - [四、系统架构](#四系统架构)
 - [五、目录结构](#五目录结构)
 - [六、环境搭建（AutoDL 6×4090）](#六环境搭建autodl-64090)
@@ -65,24 +67,41 @@ DeepSearch-RL 让一个基座大模型（Qwen3-8B）通过**强化学习**学会
 - **工程化工具链路**：SQLite 持久缓存（多进程 WAL）、API-key 轮换池（限流冷却）、指数退避重试、异常显式分类。
 - **动态 sequence balancing**：veRL 动态 batch（`use_dynamic_bsz`），将多卡 token 负载不均衡从 **52.8% 降至 0.06%**。
 - **SwanLab 全链路可观测**：loss / KL / 奖励分量 / 工具调用 / 错误率 / 轨迹长度，以及完整生成样例。
-- **冻结评测集与一键脚本**：500 题 Hard Multi-hop Search，输出准确率、Evidence Sufficiency、正确且证据充分占比、重复调用率、平均 Search 次数。
+- **固定验证集与一键脚本**：48 题 Hard Multi-hop 验证集（HotpotQA 20 + 2Wiki 16 + MuSiQue 12），训练中每 3 步自动验证，输出综合奖励、答案得分、证据分、格式分、重复调用率与平均 Search/Open 次数。
 
 ---
 
-## 三、效果指标（复现口径）
+## 三、效果指标（实验实测）
 
-评测集：**500 题冻结 Hard Multi-hop Search**（HotpotQA hard/comparison 150 + 2WikiMultihopQA 125 + MuSiQue 100 + Bamboogle 125，固定种子 seed=42）。
+评测集：**48 题 Hard Multi-hop 验证集**（HotpotQA 20 + 2WikiMultihopQA 16 + MuSiQue 12，`prepare_train.py --fast` 产出，固定 seed=42，与训练集按 id 不重叠）。
+训练配置 `val_before_train=True`、`test_freq=3`：开训前先评一次基线，之后每 3 步在同一批题上验证；裁判为在线 DeepSeek Chat（Answer / Evidence Judge），全程可用、无降级。
 
-| 指标 | 基线 Qwen3-8B | 训练后 | 变化 |
+**总体结果（基线 = 开训前 step 0；训练后 = 验证集综合奖励最高的 step 24 检查点）：**
+
+| 指标 | 基线 Qwen3-8B | 训练后（step 24） | 变化 |
 |---|---|---|---|
-| **Accuracy（准确率）** | 27.8% | **49.2%** | **+21.4 pp** |
-| **Evidence Sufficiency（证据充分度）** | 22.4% | **55.8%** | **+33.4 pp** |
-| **Correct & Sufficient（正确且证据充分轨迹）** | 11.0% | **41.6%** | +30.6 pp |
-| **Duplicate Call Rate（重复工具调用率）** | 5.19% | **1.07%** | −4.12 pp |
-| **Avg Search / query（平均搜索次数）** | — | **≈ 2.6** | — |
+| **综合奖励（val plateau score）** | −0.003 | **0.247** | **+0.250** |
+| **答案得分 r_answer（EM/F1 + Answer Judge，0–1）** | 0.104 | **0.260** | **+0.156（约 2.5×）** |
+| **格式得分 r_format（满分 0.2）** | 0.038 | **0.196** | +0.158（格式完整率约 19% → 98%） |
+| **证据分 r_evidence（Evidence Judge，0–1）** | 0.115 | **0.000** | −0.115（见下方说明） |
+| **重复工具调用率 Duplicate Call Rate** | 23.8% | **0.5%** | **−23.2 pp** |
+| **平均 Search 次数 / 题** | 3.96 | **2.50** | −1.46 |
+| **平均 Open 次数 / 题** | 1.02 | **1.67** | +0.65 |
 
-> 说明：上表为项目目标/复现口径。训练为在线 RL，结果会随搜索后端、数据配比、训练步数波动；
-> 评估脚本同时输出各数据源（hotpotqa / 2wiki / musique / bamboogle）的分组指标，便于定位。
+**答案得分 r_answer 按数据源分组（基线 → 训练后）：**
+
+| 数据源（n） | 基线 | 训练后 | 重复调用率 基线 → 训练后 |
+|---|---|---|---|
+| HotpotQA（20） | 0.10 | **0.20** | 17.1% → **0.0%** |
+| 2WikiMultihopQA（16） | 0.19 | **0.31** | 32.4% → **1.6%** |
+| MuSiQue（12） | 0.00 | **0.29** | 23.3% → **0.0%** |
+
+**口径与说明（如实记录）：**
+
+- 本次为在线 RL 快训：训练集 1728 条难多跳 prompt（HotpotQA 720 + 2Wiki 600 + MuSiQue 408），`train_batch_size=48`、`rollout.n=4`，计划 36 步；实际在 step 29 收到 SIGTERM 终止，**step 24 为验证综合奖励最高、并被保留的最佳检查点**（step 27 综合奖励 0.236，略低）。
+- 模型主要学到三件事：**稳定输出格式完整的 `<answer>`、答案得分约提升到 2.5 倍、显著抑制重复/冗余工具调用**；同时轨迹由早期的 10+ 轮冗长检索收敛为精炼的约 2 轮（训练曲线 `num_turns` 10–12 → 2）。
+- **证据分 r_evidence 后期为 0 是实测结果而非报错**：裁判服务全程在线；精炼的短轨迹虽更答对、更省工具，却被 Evidence Judge 判为证据不足，体现「简洁/工具效率」与「证据门控」之间的真实张力。因此本项目**不把"证据充分度提升"作为已验证结论**，该子分的口径需在固定裁判、固定轨迹长度后重新评测。
+- 结果会随搜索后端、数据配比、训练步数波动；离线复现可用 `python -m deepsearch_rl.eval.evaluate`（默认读取与该验证集一一对应的 `data/eval_val_48.jsonl`）。
 
 ---
 
@@ -138,8 +157,7 @@ DeepSearch-RL/
 ├── configs/
 │   ├── grpo_qwen3_8b_6x4090.yaml # 主训练配置（默认 6×RTX 4090）
 │   ├── tools_search_xml.yaml     # veRL 工具注册（search/open wrapper）
-│   ├── judge.yaml                # Judge 配置
-│   └── eval_500.yaml             # 评估配置
+│   └── judge.yaml                # Judge 配置
 ├── scripts/
 │   ├── install_autodl.sh         # AutoDL 一键装环境
 │   ├── download_model.sh         # 下载 Qwen3-8B（ModelScope）
@@ -150,8 +168,8 @@ DeepSearch-RL/
 │   └── eval.sh                   # 启动评估
 ├── data/
 │   ├── download_data.py          # 下载 5 个数据源并归一
-│   ├── prepare_train.py          # 生成 veRL 训练 parquet
-│   ├── build_eval_500.py         # 构造 500 题冻结评测集
+│   ├── prepare_train.py          # 生成 veRL 训练 parquet / fast 子集（并导出 48 题验证集）
+│   ├── eval_val_48.jsonl         # 48 题多跳验证集（离线评测默认输入）
 │   └── README.md
 ├── deepsearch_rl/
 │   ├── protocol.py               # 工具标签协议（解析/观测/系统提示）
@@ -161,7 +179,7 @@ DeepSearch-RL/
 │   ├── agent/                    # 解析器、自定义 loop、轨迹分析、独立推理
 │   ├── rewards/                  # EM/F1、工具效率、分层奖励
 │   ├── train/                    # 训练入口、SwanLab 封装
-│   ├── eval/                     # 500 题评估
+│   ├── eval/                     # 48 题验证集离线评测
 │   └── utils/                    # 配置/日志/随机种子
 └── tests/                        # 离线逻辑测试（不触网）
 ```
@@ -268,18 +286,18 @@ bash scripts/download_data.sh
 该脚本依次执行：
 
 1. **下载**：HotpotQA（fullwiki）、2WikiMultihopQA、MuSiQue、NQ-open、Bamboogle，归一为统一中间 jsonl；
-2. **构造 500 题冻结评测集**：`data/eval_hard_500.jsonl`（seed=42，配额 150/125/100/125）；
-3. **生成训练 parquet**：`data/processed/train/`、`data/processed/val/`。
+2. **生成全量训练 parquet**：`data/processed/train/`、`data/processed/val/`；
+3. **生成 fast 子集**：`data/processed/fast/train/`（1728 条难多跳）与 `data/processed/fast/val/`（48 题验证集），并导出离线评测输入 `data/eval_val_48.jsonl`。
 
 单独执行各步：
 
 ```bash
 python data/download_data.py --out_dir data/raw --nq_limit 30000
-python data/build_eval_500.py --raw_dir data/raw --out data/eval_hard_500.jsonl
 python data/prepare_train.py --raw_dir data/raw --out_dir data/processed
+python data/prepare_train.py --raw_dir data/raw --fast --seed 42
 ```
 
-**训练集口径**：NQ-open 降采样 30k + HotpotQA fullwiki train + 2Wiki train + MuSiQue train；Bamboogle 仅用于评测、不入训练。
+**本次实验口径**：fast 训练集 1728 条（HotpotQA 720 + 2Wiki 600 + MuSiQue 408），验证集 48 题（20/16/12）；NQ/Bamboogle 已下载归一，但未进入本次 fast 训练与验证。
 
 训练 parquet 每行字段：
 
@@ -431,7 +449,7 @@ python -m sglang.launch_server \
   --model $HOME/checkpoints/deepsearch-rl/qwen3-8b/actor \
   --served-model-name default --port 30000
 
-# 全量 500 题（Judge 服务需在 :8001 运行）
+# 全量 48 题验证集（裁判默认走 DeepSeek API；也可指向自备 Judge :8001）
 bash scripts/eval.sh
 
 # 调试：只跑前 20 题
@@ -441,7 +459,7 @@ bash scripts/eval.sh --limit 20
 bash scripts/eval.sh --save_trajectories
 ```
 
-输出 5 个核心指标 + 按数据源分组，并写 JSON 到 `outputs/eval/`。
+输出答案正确率、证据充分度、正确且证据充分占比、重复调用率、平均 Search 次数等指标，并按数据源（hotpotqa / 2wiki / musique）分组，结果写 JSON 到 `outputs/eval/`。
 
 **基线 vs 训练后对比**：
 

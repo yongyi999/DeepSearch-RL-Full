@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-500 题冻结评测入口
-====================
+多跳搜索验证集离线评测入口
+==========================
 
-对齐 ENGINEERING_SPEC 4.2 / 第 7 节。流程：
+流程：
 
-a) 加载 ``data/eval_hard_500.jsonl``（字段 question/gold_answers/source/num_hops/
-   supporting_titles …）。
+a) 加载 ``data/eval_val_48.jsonl``（实验实际使用的 48 题多跳验证集，字段
+   question/gold_answers/source/num_hops/supporting_titles …）。该文件与
+   ``data/processed/fast/val/`` 一一对应（HotpotQA 20 + 2WikiMultihopQA 16 +
+   MuSiQue 12，固定 seed=42）。
 b) 用 ``tool_factory`` 构建真实 search/open 工具（含缓存 / key 轮换 / 重试），
    用 :class:`OpenAICompatAgent` 作为 agent（base_url 指向被评模型的 SGLang/vLLM
    OpenAI 端点，注入 search/open 工具，max_turns 控制检索深度）。
@@ -18,11 +20,15 @@ d) 逐题打分：
    - correct_and_sufficient = 二者同时成立。
    - duplicate_rate = num_duplicate / max(num_tool_calls, 1)。
    - num_search。
-e) 汇总 5 个核心指标（与简历口径一致），并按 source 分组。
+e) 汇总核心指标，并按 source 分组。
 f) 写 JSON（配置 + 总体 + 分组 + 耗时），控制台打印 Markdown 表；--save_trajectories
    时把每题完整轨迹写 jsonl。
 
-降级约定（SPEC 3.7）：
+说明：实验的主要结论来自训练过程中在该 48 题验证集上的周期性验证（veRL
+``val_before_train`` / ``test_freq``，指标见 README「效果指标」）。本入口提供
+同一份题目的离线、可重复评测能力。
+
+降级约定：
 - Judge 不可达：答案退回 EM/F1 规则，证据退回 supporting-title 命中代理，不抛异常。
 - 被评模型端点不可达：捕获连接异常，给清晰中文提示（如何用 SGLang 起模型），
   该题记为 answer=None，不中断整体评测。
@@ -32,8 +38,8 @@ f) 写 JSON（配置 + 总体 + 分组 + 耗时），控制台打印 Markdown �
     python -m deepsearch_rl.eval.evaluate \
         --model_endpoint http://127.0.0.1:30000/v1 \
         --model_name Qwen/Qwen3-8B \
-        --judge_base_url http://127.0.0.1:8001/v1 \
-        --judge_model judge
+        --judge_base_url https://api.deepseek.com/v1 \
+        --judge_model deepseek-chat
 
 或用 ``--compare baseline.json trained.json`` 只做两份结果对比。
 """
@@ -65,7 +71,7 @@ except Exception:  # pragma: no cover
     JudgeClient = Any  # type: ignore
     _HAS_JUDGE_CLIENT = False
 
-# 五个核心指标的固定展示顺序（与简历口径一致）
+# 核心指标的固定展示顺序
 METRIC_ORDER = [
     ("accuracy", "Accuracy", "pct"),
     ("evidence_sufficiency", "Evidence Suff.", "pct"),
@@ -74,8 +80,8 @@ METRIC_ORDER = [
     ("avg_search_per_query", "Avg Search/query", "f1"),
 ]
 
-# 默认按 source 分组的固定顺序
-SOURCE_ORDER = ["hotpotqa", "2wiki", "musique", "bamboogle"]
+# 默认按 source 分组的固定顺序（48 题验证集只含这三个源）
+SOURCE_ORDER = ["hotpotqa", "2wiki", "musique"]
 
 
 # ============================================================================
@@ -135,7 +141,7 @@ class PerItemScore:
 # 数据加载
 # ============================================================================
 def load_eval_rows(path: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """读取冻结评测 jsonl；逐行容错，空行跳过。limit 仅取前 N 题（调试用）。"""
+    """读取评测 jsonl；逐行容错，空行跳过。limit 仅取前 N 题（调试用）。"""
     rows: List[Dict[str, Any]] = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -384,7 +390,8 @@ async def _run_eval(args: argparse.Namespace) -> Dict[str, Any]:
     # a) 加载评测集
     if not os.path.exists(args.eval_file):
         raise FileNotFoundError(
-            f"找不到评测集：{args.eval_file}\n请先运行 data/build_eval_500.py 生成。"
+            f"找不到评测集：{args.eval_file}\n仓库默认提供 data/eval_val_48.jsonl；"
+            "也可用 data/processed/fast/val 的验证 parquet 重新导出。"
         )
     rows = load_eval_rows(args.eval_file, limit=args.limit)
     print(f"[load] 加载评测题 {len(rows)} 条：{args.eval_file}")
@@ -518,7 +525,7 @@ async def _run_eval(args: argparse.Namespace) -> Dict[str, Any]:
 
     # 控制台 Markdown 表
     md = build_markdown_table(agg)
-    print("\n=== 500 题冻结评测指标 ===\n")
+    print("\n=== 多跳搜索验证集评测指标（48 题）===\n")
     print(md)
     print(f"\n[done] 耗时 {elapsed:.1f}s，指标已写：{args.out}")
     return payload
@@ -528,9 +535,9 @@ async def _run_eval(args: argparse.Namespace) -> Dict[str, Any]:
 # CLI
 # ============================================================================
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="DeepSearch-RL 500 题冻结评测")
-    p.add_argument("--eval_file", default="data/eval_hard_500.jsonl",
-                   help="冻结评测集 jsonl（默认 data/eval_hard_500.jsonl）")
+    p = argparse.ArgumentParser(description="DeepSearch-RL 多跳搜索验证集评测（48 题）")
+    p.add_argument("--eval_file", default="data/eval_val_48.jsonl",
+                   help="评测集 jsonl（默认 data/eval_val_48.jsonl）")
     p.add_argument("--model_endpoint", default="http://127.0.0.1:30000/v1",
                    help="被评模型的 SGLang/vLLM OpenAI 端点")
     p.add_argument("--model_name", default="default",
@@ -546,7 +553,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_turns", type=int, default=12, help="每题最多检索轮次")
     p.add_argument("--concurrency", type=int, default=16, help="并发题数")
     p.add_argument("--limit", type=int, default=None,
-                   help="调试用：只跑前 N 题（默认全量 500）")
+                   help="调试用：只跑前 N 题（默认全量 48 题）")
     p.add_argument("--out", default=None, help="指标 JSON 输出路径")
     p.add_argument("--save_trajectories", action="store_true",
                    help="是否把每题完整轨迹另存为 jsonl")

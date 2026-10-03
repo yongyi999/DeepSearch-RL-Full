@@ -32,35 +32,27 @@ fi
 # 统一输出目录（可通过环境变量覆盖）
 RAW_DIR="${RAW_DIR:-data/raw}"
 PROCESSED_DIR="${PROCESSED_DIR:-data/processed}"
-EVAL_OUT="${EVAL_OUT:-data/eval_hard_500.jsonl}"
 
 # ---- 1. 下载 + 归一为统一中间 jsonl ----
 #   --nq_limit 30000：下载期对 NQ-open train 的硬截断（省磁盘）
 #   --backend auto  ：优先 modelscope，失败回退 HF datasets（自动走 HF_ENDPOINT 镜像）
-echo ">>> [1/4] 下载并归一数据集 -> ${RAW_DIR}"
+echo ">>> [1/3] 下载并归一数据集 -> ${RAW_DIR}"
 python data/download_data.py \
   --out_dir "${RAW_DIR}" \
   --sources nq,hotpotqa,2wiki,musique,bamboogle \
   --nq_limit 30000 \
   --backend auto
 
-# ---- 2. 构建 500 题冻结评测集（seed=42）----
-echo ">>> [2/4] 构建 500 题冻结评测集 -> ${EVAL_OUT}"
-python data/build_eval_500.py \
-  --raw_dir "${RAW_DIR}" \
-  --out "${EVAL_OUT}" \
-  --seed 42
-
-# ---- 3. 全量 veRL 训练 parquet（NQ 再按 seed=42 降采样到 30000）----
-echo ">>> [3/4] 生成全量训练/val parquet -> ${PROCESSED_DIR}"
+# ---- 2. 全量 veRL 训练 parquet（NQ 再按 seed=42 降采样到 30000）----
+echo ">>> [2/3] 生成全量训练/val parquet -> ${PROCESSED_DIR}"
 python data/prepare_train.py \
   --raw_dir "${RAW_DIR}" \
   --out_dir "${PROCESSED_DIR}" \
   --nq_limit 30000 \
   --seed 42
 
-# ---- 4. 6 小时快训子集（难多跳 1728 条，主配置默认用这个）----
-echo ">>> [4/4] 生成 6h 快训子集 -> ${PROCESSED_DIR}/fast"
+# ---- 3. 快训子集（难多跳 1728 条 + 48 题验证集，主配置默认用这个）----
+echo ">>> [3/3] 生成快训子集 -> ${PROCESSED_DIR}/fast"
 python data/prepare_train.py \
   --raw_dir "${RAW_DIR}" \
   --fast \
@@ -69,5 +61,5 @@ python data/prepare_train.py \
 echo ">>> 全部完成。"
 echo "    中间数据 : ${RAW_DIR}"
 echo "    全量 parquet : ${PROCESSED_DIR}/train/  与  ${PROCESSED_DIR}/val/"
-echo "    6h 快训 : ${PROCESSED_DIR}/fast/train/  与  ${PROCESSED_DIR}/fast/val/"
-echo "    评测集   : ${EVAL_OUT}"
+echo "    快训子集 : ${PROCESSED_DIR}/fast/train/  与  ${PROCESSED_DIR}/fast/val/"
+echo "    离线评测 : data/eval_val_48.jsonl（与 fast/val 的 48 题一一对应，已随仓库提供）"
