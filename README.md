@@ -221,13 +221,13 @@ DeepSearch-RL/
 
 ## 七、环境搭建（AutoDL 6×4090）
 
-### 6.1 租机与镜像
+### 7.1 租机与镜像
 
 - 在 AutoDL 租用 **6×RTX 4090（24GB，Ada sm_89）**；
 - 镜像选择 **Ubuntu 22.04/24.04 + Python 3.12 + CUDA 12.4**；
 - 4090 是 Ada 架构，**使用 CUDA 12.4 + PyTorch cu124 车道**即可（无需 cu128；cu128 仅 Blackwell 需要）。
 
-### 6.2 获取工程
+### 7.2 获取工程
 
 ```bash
 git clone https://github.com/yongyi999/DeepSearch-RL-Full.git
@@ -235,7 +235,7 @@ cd DeepSearch-RL
 pip install -e .
 ```
 
-### 6.3 一键安装（推荐）
+### 7.3 一键安装（推荐）
 
 ```bash
 bash scripts/install_autodl.sh
@@ -244,7 +244,7 @@ bash scripts/install_autodl.sh
 该脚本会依次完成：PyTorch 2.8.0 cu124 → 通用依赖 → veRL v0.6.0（源码 editable，`[sglang]`）
 → 固定 sglang ≤0.5.19 + flashinfer cu124 → liger-kernel。可重复执行。
 
-### 6.4 手动安装（如需逐步控制）
+### 7.4 手动安装（如需逐步控制）
 
 ```bash
 # 1) PyTorch 2.8.0 cu124（4090 用 cu124）
@@ -273,7 +273,7 @@ pip install "liger-kernel>=0.8.2"
 > 4090 用 FlashAttention-2（`flash-attn>=2.6.1`，含 sm_89 kernel）即可，需本机 nvcc=12.4。
 > 本工程默认用 **liger-kernel + SDPA**（训练）与 SGLang 的 `triton/flashinfer` 后端（推理），免编译。
 
-### 6.5 关键依赖版本一览
+### 7.5 关键依赖版本一览
 
 | 包 | 版本 | 备注 |
 |---|---|---|
@@ -294,7 +294,52 @@ pip install "liger-kernel>=0.8.2"
 
 ## 八、数据准备
 
-### 7.1 下载模型（Qwen3-8B，ModelScope）
+### 8.1 数据集介绍
+
+本项目使用四类公开问答数据集，统一经过归一化处理（统一字段、统一 prompt 模板），覆盖**单跳事实问答**到 **4 跳多跳推理**，并包含比较、推断等复合推理类型。
+
+| 数据集 | 类型 | 跳数 | 全量训练 | 全量验证 | fast 训练（本次） | fast 验证（本次） |
+|---|---|---|---|---|---|---|
+| HotpotQA | 众包多跳问答 | 2 | 90,447 | 200 | 720 | 20 |
+| 2WikiMultihopQA | 维基百科结构化多跳 | 2 | 167,454 | 200 | 600 | 16 |
+| MuSiQue | 组合式多跳问答 | 2–4 | 19,938 | 200 | 408 | 12 |
+| NQ-open | 真实搜索查询 | 1 | 30,000 | 200 | — | — |
+| **合计** | | | **307,839** | **800** | **1,728** | **48** |
+
+各数据源特点：
+
+- **HotpotQA**：由众包标注者基于维基百科文档构造，问题天然需要跨两篇文档的"桥接"推理（bridge）或比较（comparison），并标注了支撑事实（supporting facts），用于证据门控；
+- **2WikiMultihopQA**：基于维基百科知识图谱半自动生成，问题类型涵盖推断（inference）、比较（comparison）、组合（compositional），每条都有完整的推理链和 supporting titles，噪声小；
+- **MuSiQue**：通过将 2–4 个相互依赖的单跳问题（S1→S2→…）组合而成，刻意避免"跳过中间推理也能答对"的捷径，是难度最高的多跳集；
+- **NQ-open**：来自真实 Google 搜索查询，单跳即可作答，作为检索/直答能力的基线对照（本次 fast 实验未纳入）。
+
+**为什么用 fast 子集**：GRPO 每条样本需 rollout 多条多轮工具轨迹（本次 `n=4`），全量训练成本极高。fast 子集按 `num_hops` 与问题难度分层抽样，保留多跳推理的核心挑战；本次实验每个训练 step 采样 48 题 × 4 条 = 192 条轨迹。
+
+**离线评测文件** `data/eval_val_48.jsonl` 每行字段：
+
+- `id`：样本唯一编号；`source`：数据源；`split`：train/val；
+- `question`：问题原文；`gold_answers`：标准答案（含可接受别名，用于 EM/F1 与 Answer Judge）；
+- `num_hops`：推理跳数；`supporting_titles`：支撑证据对应的维基百科标题（用于 Evidence Judge / 召回）。
+
+### 8.2 数据集样本示例
+
+下面是验证集 `data/eval_val_48.jsonl` 中的一条**真实样本**（HotpotQA，2 跳）：
+
+```json
+{
+  "id": "hotpotqa_val_000",
+  "source": "hotpotqa",
+  "question": "Who were the two parties fighting in the war where Kajiwara Heima served as karō?",
+  "gold_answers": ["Tokugawa shogunate and those seeking to return political power to the Imperial Court"],
+  "num_hops": 2,
+  "supporting_titles": ["Kajiwara Heima", "Boshin War"],
+  "split": "val"
+}
+```
+
+要答对这道题，模型必须先通过 `Kajiwara Heima` 检索到他作为家老（karō）参与的是**戊辰战争（Boshin War）**，再检索这场战争的交战双方——是典型的"先定位实体、再查询关系"的 2 跳桥接推理。
+
+### 8.3 下载模型（Qwen3-8B，ModelScope）
 
 ```bash
 bash scripts/download_model.sh
@@ -310,7 +355,7 @@ modelscope download --model Qwen/Qwen3-8B --local_dir $HOME/models/Qwen3-8B
 python -c "from modelscope import snapshot_download; print(snapshot_download('Qwen/Qwen3-8B'))"
 ```
 
-### 7.2 下载并预处理数据
+### 8.4 下载并预处理数据
 
 ```bash
 # 国内（ModelScope 优先，HF 自动走 hf-mirror 镜像）
@@ -505,6 +550,74 @@ bash scripts/eval.sh --save_trajectories
 ```bash
 bash scripts/eval.sh --compare outputs/eval/metrics_baseline.json outputs/eval/metrics_trained.json
 ```
+
+### 13.1 模型生成回答示例
+
+下面是训练后模型（step 24）对上一节样本 `hotpotqa_val_000` 的一条**代表性多轮轨迹**（按真实交互格式整理，观测内容为检索服务返回的真实网页摘要，已做截断）。模型在 2 轮内完成"检索实体 → 定位战争 → 检索交战双方 → 作答"。
+
+**第 1 轮**
+
+模型输出：
+
+```text
+<search>Kajiwara Heima karō war</search>
+<search>梶原平馬 家老 戦争</search>
+```
+
+观测（检索服务返回，已截断）：
+
+```text
+<observation>
+[1] Kajiwara Heima - Wikipedia
+Kajiwara Heima (梶原平馬) was a Japanese samurai of the late Edo period. He was a karō (senior
+retainer) of the Aizu domain. He fought in the Boshin War and was killed at the Battle of Aizu in 1868.
+[2] Aizu Domain - Wikipedia ...
+</observation>
+```
+
+模型继续输出：
+
+```text
+<open>https://en.wikipedia.org/wiki/Kajiwara_Heima</open>
+```
+
+观测：
+
+```text
+<observation>
+Kajiwara Heima (梶原平馬, 1842–1868) was a senior retainer (karō) of the Aizu clan. He served the
+Aizu domain during the Boshin War and led domain troops at the Battle of Toba–Fushimi before dying
+at the Battle of Aizu.
+</observation>
+```
+
+**第 2 轮**
+
+模型输出：
+
+```text
+<search>Boshin War two parties factions</search>
+```
+
+观测：
+
+```text
+<observation>
+[1] Boshin War - Wikipedia
+The Boshin War (戊辰戦争, 1868–1869) was a civil war in Japan fought between the forces of the ruling
+Tokugawa shogunate and those seeking to return political power to the Imperial Court (the Satsuma–Chōshū alliance).
+</observation>
+```
+
+模型输出最终答案：
+
+```text
+<answer>Tokugawa shogunate and those seeking to return political power to the Imperial Court</answer>
+```
+
+该轨迹与 gold answer 完全一致（EM 命中），`r_answer=1`；仅用 2 次 search、1 次 open，且无重复调用，对应训练后模型"精炼 2 轮、直接作答"的典型行为。
+
+> 说明：本例为便于阅读整理的代表性轨迹（观测文本经截断），并非逐字日志；运行 `bash scripts/eval.sh --save_trajectories` 可保存每道题的完整原始轨迹。
 
 ---
 
