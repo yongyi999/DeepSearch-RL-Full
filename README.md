@@ -26,18 +26,19 @@ Qwen3-8B 的综合奖励（val plateau score）从 **约 0（−0.003）提升�
 - [一、项目简介](#一项目简介)
 - [二、核心特性](#二核心特性)
 - [三、效果指标（实验实测）](#三效果指标实验实测)
-- [四、系统架构](#四系统架构)
-- [五、目录结构](#五目录结构)
-- [六、环境搭建（AutoDL 6×4090）](#六环境搭建autodl-64090)
-- [七、数据准备](#七数据准备)
-- [八、启动检索服务](#八启动检索服务)
-- [九、启动远程 Judge](#九启动远程-judge)
-- [十、SwanLab 登录](#十swanlab-登录)
-- [十一、启动训练](#十一启动训练)
-- [十二、评估](#十二评估)
-- [十三、显存与调参](#十三显存与调参)
-- [十四、常见问题 FAQ](#十四常见问题-faq)
-- [十五、参考与致谢](#十五参考与致谢)
+- [四、奖励函数设置](#四奖励函数设置)
+- [五、系统架构](#五系统架构)
+- [六、目录结构](#六目录结构)
+- [七、环境搭建（AutoDL 6×4090）](#七环境搭建autodl-64090)
+- [八、数据准备](#八数据准备)
+- [九、启动检索服务](#九启动检索服务)
+- [十、配置 Judge（默认 DeepSeek）](#十配置-judge默认-deepseek)
+- [十一、SwanLab 登录](#十一swanlab-登录)
+- [十二、启动训练](#十二启动训练)
+- [十三、评估](#十三评估)
+- [十四、显存与调参](#十四显存与调参)
+- [十五、常见问题 FAQ](#十五常见问题-faq)
+- [十六、参考与致谢](#十六参考与致谢)
 
 ---
 
@@ -49,7 +50,7 @@ DeepSearch-RL 让一个基座大模型（Qwen3-8B）通过**强化学习**学会
 与直接用 RAG 或让模型一次性输出答案不同，本工程的关键是把 **Search/Open 工具交互**纳入 RL 训练闭环：
 
 - rollout 阶段模型与工具进行**多轮异步交互**（veRL `ToolAgentLoop` 状态机 + 自定义 `search_xml` 解析器）；
-- 奖励由**远程 vLLM Judge** 构造，包含答案正确性与证据充分性；
+- 奖励由**远程 Judge（DeepSeek Chat，OpenAI 兼容 API）**构造，包含答案正确性与证据充分性；
 - 奖励是「**证据充分度驱动的分层奖励**」：猜对但没有证据只能拿到低分（抑制 reward hacking），
   证据充分前的有效探索不被惩罚（缓解 under-search），重复调用与证据充分后的冗余调用被惩罚（抑制 over-search）。
 
@@ -63,9 +64,9 @@ DeepSearch-RL 让一个基座大模型（Qwen3-8B）通过**强化学习**学会
 - **veRL 原生 Agentic RL**：基于 veRL v0.6.0 搭建多轮 Search/Open 工具交互链路，异步 `ToolAgentLoop` + GRPO 策略优化，无需 fork 框架。
 - **证据充分度驱动的分层奖励**：联合优化答案正确性、证据充分性、格式完整性、工具效率；
   保护有效探索、惩罚重复调用及证据充分后的冗余调用，缓解 under-search 与 reward hacking。
-- **远程 vLLM Judge**：独立部署 Answer Judge / Evidence Judge，训练奖励通过 HTTP 异步调用，与训练解耦。
+- **远程 Judge（DeepSeek Chat）**：Answer Judge / Evidence Judge 统一由 DeepSeek Chat（`deepseek-chat`）承担，训练奖励通过 OpenAI 兼容 API 异步调用，与训练解耦；也可通过 `JUDGE_BASE_URL` 指向本地 vLLM 服务。
 - **工程化工具链路**：SQLite 持久缓存（多进程 WAL）、API-key 轮换池（限流冷却）、指数退避重试、异常显式分类。
-- **动态 sequence balancing**：veRL 动态 batch（`use_dynamic_bsz`），将多卡 token 负载不均衡从 **52.8% 降至 0.06%**。
+- **动态 sequence balancing**：veRL 动态 batch（`use_dynamic_bsz`），将多卡 token 负载不均衡从 **约 17.5% 降至 0.003%**。
 - **SwanLab 全链路可观测**：loss / KL / 奖励分量 / 工具调用 / 错误率 / 轨迹长度，以及完整生成样例。
 - **固定验证集与一键脚本**：48 题 Hard Multi-hop 验证集（HotpotQA 20 + 2Wiki 16 + MuSiQue 12），训练中每 3 步自动验证，输出综合奖励、答案得分、证据分、格式分、重复调用率与平均 Search/Open 次数。
 
@@ -105,13 +106,45 @@ DeepSearch-RL 让一个基座大模型（Qwen3-8B）通过**强化学习**学会
 
 ---
 
-## 四、系统架构
+## 四、奖励函数设置
+
+奖励对**整条轨迹**（而非单个 token）打分，由四个分量组成；权重集中在 `deepsearch_rl/rewards/hierarchical.py` 的 `RewardWeights`，默认值即本次实验冻结值，集中管理便于调参。
+
+| 分量 | 取值范围 | 计算方式 |
+|---|---|---|
+| **R_format（格式）** | 0 / 0.1 / 0.2 | 有 `<answer>` 且无 malformed 片段 = 0.2；有 answer 但存在 malformed = 0.1；无 answer = 0 |
+| **R_answer（答案）** | 0 ~ 1 | 规则先行：归一化后 EM 命中或 token-F1 ≥ 0.9 给 1，否则取 F1；规则未命中再请 Answer Judge：correct = 1 / partial = 0.5 / wrong = 0 |
+| **R_evidence（证据）** | 0 ~ 1 | Evidence Judge 对轨迹收集的证据输出连续分，**0.6 判为充分** |
+| **R_tool（工具效率）** | −0.5 ~ 0.1 | 重复调用每次 −0.15（封顶 −0.3）；证据充分后冗余调用每次 −0.1（封顶 −0.2）；无重复且高效完成 + 0.1 |
+
+**总分合成（证据充分度门控答案奖励）：**
+
+```
+R_total = R_format
+        + R_answer × (0.2 + 0.8 × R_evidence)   # 证据门控答案奖励
+        + 0.3 × R_evidence × R_answer           # 正确且证据充分的联合奖励
+        + R_tool − undersearch_penalty          # undersearch_penalty = 0.5
+```
+
+**设计要点：**
+
+- **答案门控**：答案奖励的 80% 由证据充分度决定——猜对但无证据只能拿到 0.2 倍基础分，抑制 reward hacking；
+- **联合奖励**：正确且证据充分时额外 +0.3（R_evidence × R_answer），引导模型「先取证、再作答」；
+- **工具效率**：证据充分前的有效探索不被惩罚（缓解 under-search），重复调用与证据充分后的冗余调用被惩罚（抑制 over-search）；
+- **反纯猜**：一次工具都不调用就作答，答案分清零并额外扣 0.5，总分变负，避免「不搜直接猜对」压过「去搜索」的轨迹；
+- **降级兜底**：Judge 不可达时自动退回规则分（EM/F1 + 证据标题命中代理，命中给 0.6），任何异常都不中断训练。
+
+> **量级参考**：正确且证据充分的轨迹约 1.6 分；搜过但证据不足的正确答案只能拿到格式分与门控下限。
+
+---
+
+## 五、系统架构
 
 ```
                          ┌──────────────────────────────────────────────┐
                          │  训练进程（Ray + veRL，6×RTX 4090）               │
    parquet 训练集  ────▶ │  GRPO RayPPOTrainer                          │
-   (42 prompts/step)     │    │                                         │
+   (48 prompts/step)     │    │                                         │
                          │    ▼                                         │
                          │  DeepSearchAgentLoop（deepsearch_agent）       │
                          │    ├─ SGLang 生成（TITO token 层拼接）          │
@@ -127,13 +160,13 @@ DeepSearch-RL 让一个基座大模型（Qwen3-8B）通过**强化学习**学会
                   │  持久缓存 + key 轮换 + 重试 + 分类  │
                   └──────────────────────────────────┘
                                    ▲
-  远程 vLLM Judge（:8001）──────────┘  judge_client（异步 OpenAI 协议）
+  远程 Judge（DeepSeek Chat API）─┘  judge_client（异步 OpenAI 兼容协议）
   · Answer Judge   · Evidence Judge
 ```
 
 **一次训练 step 的流程：**
 
-1. 从训练 parquet 采样 42 个 prompt，每个 prompt 采样 7 条 → 并行生成 **294 条多轮交互轨迹**；
+1. 从训练 parquet 采样 48 个 prompt，每个 prompt 采样 4 条 → 并行生成 **192 条多轮交互轨迹**；
 2. 每条轨迹在 SGLang 上生成，`search_xml_parser` 解析 `<search>/<open>` 标签；
 3. 工具 wrapper 通过 HTTP 调用检索服务（命中缓存则直接返回），观测以 `<observation>` 拼回，进入下一轮；
 4. 模型给出 `<answer>` 或达到轮数上限后结束；
@@ -146,7 +179,7 @@ DeepSearch-RL 让一个基座大模型（Qwen3-8B）通过**强化学习**学会
 
 ---
 
-## 五、目录结构
+## 六、目录结构
 
 ```
 DeepSearch-RL/
@@ -186,7 +219,7 @@ DeepSearch-RL/
 
 ---
 
-## 六、环境搭建（AutoDL 6×4090）
+## 七、环境搭建（AutoDL 6×4090）
 
 ### 6.1 租机与镜像
 
@@ -197,7 +230,7 @@ DeepSearch-RL/
 ### 6.2 获取工程
 
 ```bash
-git clone https://github.com/yongyi999/DeepSearch-RL.git
+git clone https://github.com/yongyi999/DeepSearch-RL-Full.git
 cd DeepSearch-RL
 pip install -e .
 ```
@@ -250,7 +283,8 @@ pip install "liger-kernel>=0.8.2"
 | verl | **v0.6.0** | 源码 editable，勿用 main |
 | sglang | **≥0.4.6, <0.5.20** | 最后 CUDA12 车道 |
 | flashinfer | cu124/torch2.8 | 对应 find-links |
-| vllm（Judge 服务） | 随 verl v0.6.0 | OpenAI 兼容端点 |
+| DeepSeek API（Judge） | deepseek-chat | 默认 Answer/Evidence Judge，OpenAI 兼容 |
+| vllm（可选本地 Judge） | 随 verl v0.6.0 | 仅离线场景，OpenAI 兼容端点 |
 | liger-kernel | ≥0.8.2 | 免编译 kernel |
 | modelscope | 1.23.1 | 模型/数据下载 |
 | ray | ≥2.45, <2.49 | 分布式 |
@@ -258,7 +292,7 @@ pip install "liger-kernel>=0.8.2"
 
 ---
 
-## 七、数据准备
+## 八、数据准备
 
 ### 7.1 下载模型（Qwen3-8B，ModelScope）
 
@@ -317,7 +351,7 @@ python data/prepare_train.py --raw_dir data/raw --fast --seed 42
 
 ---
 
-## 八、启动检索服务
+## 九、启动检索服务
 
 **终端 A（常驻）**：
 
@@ -348,20 +382,21 @@ SEARCH_BACKEND=ddg bash scripts/start_retrieval.sh
 
 ---
 
-## 九、启动远程 Judge
+## 十、配置 Judge（默认 DeepSeek）
 
-**终端 B（常驻）**：
+本次实验的 Answer Judge / Evidence Judge **统一由 DeepSeek Chat 承担，无需在本机部署 vLLM**，只需配置 API key：
 
 ```bash
-# 默认用 Qwen3-8B 作为裁判模型，端口 8001
-bash scripts/start_judge.sh
+# 密钥写入工程根目录 .env（已被 .gitignore 忽略，不会入库）
+export DEEPSEEK_API_KEY="sk-xxxx"
 
-# 自定义裁判模型 / 并行度
-JUDGE_MODEL=Qwen/Qwen2.5-7B-Instruct JUDGE_TP=1 JUDGE_GPU_MEM=0.4 \
-  bash scripts/start_judge.sh
+# 检查配置（默认 base_url=https://api.deepseek.com/v1，model=deepseek-chat）
+bash scripts/start_judge.sh
 ```
 
-等价的手动 vLLM 命令：
+默认参数见 `configs/judge.yaml`：`max_concurrency=16`、`timeout=120`、`max_retries=3`、证据充分阈值 0.6。
+
+**可选：使用本地 vLLM 作为 Judge**（无 API 费用 / 离线场景）：
 
 ```bash
 vllm serve Qwen/Qwen3-8B \
@@ -369,19 +404,23 @@ vllm serve Qwen/Qwen3-8B \
   --host 0.0.0.0 --port 8001 \
   --tensor-parallel-size 1 --gpu-memory-utilization 0.4 \
   --max-model-len 8192 --dtype bfloat16 --enable-prefix-caching
+
+# 训练前指向本地服务
+export JUDGE_BASE_URL="http://127.0.0.1:8001/v1"
+export JUDGE_MODEL="judge"
 ```
 
-> **注意模型名**：启动器用了 `--served-model-name judge`，因此 reward/eval 客户端的 `JUDGE_MODEL` 要设为 **`judge`**
-> （主配置默认已是 `judge`）；若不使用 `--served-model-name`，则客户端用模型路径名。
+> **注意模型名**：本地 vLLM 用了 `--served-model-name judge`，客户端的 `JUDGE_MODEL` 必须设为 `judge`；
+> 使用 DeepSeek 时保持 `deepseek-chat`。
 
-两类裁判：
+两类裁判职责：
 
 - **Answer Judge**：对照 gold answers 判断预测答案是否正确（correct / partial / wrong）；
 - **Evidence Judge**：判断收集到的证据是否足以支撑答案，输出 0..1 连续分（阈值 0.6 判充分）。
 
 ---
 
-## 十、SwanLab 登录
+## 十一、SwanLab 登录
 
 ```bash
 pip install swanlab==0.9.0
@@ -402,9 +441,9 @@ SwanLab 上可看到：`actor/policy_loss`、`actor/kl`、`actor/entropy`、`act
 
 ---
 
-## 十一、启动训练
+## 十二、启动训练
 
-**终端 C**（确保终端 A、B 已启动）：
+**终端 C**（确保终端 A 已启动、DeepSeek API key 已配置）：
 
 ```bash
 export MODEL_PATH=$HOME/models/Qwen3-8B
@@ -421,7 +460,7 @@ MODEL_PATH=$HOME/models/Qwen3-8B \
 
 ### 默认配置口径（6×RTX 4090，configs/grpo_qwen3_8b_6x4090.yaml）
 
-- `data.train_batch_size=42`（42 prompts），`rollout.n=7` → **42×7 = 294 条多轮轨迹**（24GB 显存保守档，可按显存上调）；
+- `data.train_batch_size=48`（48 prompts），`rollout.n=4` → **48×4 = 192 条多轮轨迹**（24GB 显存保守档，可按显存上调）；
 - `rollout.name=sglang`、`rollout.mode=async`、`multi_turn.enable=True`、`multi_turn.format=search_xml`；
 - `agent.default_agent_loop=deepsearch_agent`；
 - `actor.use_dynamic_bsz=True`（动态 sequence balancing）、`state_masking=True`；
@@ -439,7 +478,7 @@ bash scripts/train.sh \
 
 ---
 
-## 十二、评估
+## 十三、评估
 
 训练完成后，先用 SGLang/vLLM 把**被评模型**以 OpenAI 端点起好（例如端口 30000），再跑评测：
 
@@ -469,23 +508,23 @@ bash scripts/eval.sh --compare outputs/eval/metrics_baseline.json outputs/eval/m
 
 ---
 
-## 十三、显存与调参
+## 十四、显存与调参
 
-### 13.1 显存估算（6×4090 24GB）
+### 14.1 显存估算（6×4090 24GB）
 
-- **训练态**：FSDP 分片 bf16 参数 + bf16 梯度 + fp32 Adam 状态约 **22–24GB/卡**，已贴近 24GB 上限，需依赖梯度检查点 + 动态 batch（`use_dynamic_bsz`）+ 调低 `ppo_micro_batch_size_per_gpu`（默认 2）；仍 OOM 则按 13.2 降档；
-- **Rollout 态**：SGLang 默认 `TP=2 / DP=3`，权重分片 + KV 缓存由 `gpu_memory_utilization`（默认 0.45）控制；
+- **训练态**：FSDP 分片 bf16 参数 + bf16 梯度 + fp32 Adam 状态约 **22–24GB/卡**，已贴近 24GB 上限，需依赖梯度检查点 + 动态 batch（`use_dynamic_bsz`）+ 调低 `ppo_micro_batch_size_per_gpu`（默认 1）；仍 OOM 则按 14.2 降档；
+- **Rollout 态**：SGLang 默认 `TP=2 / DP=3`，权重分片 + KV 缓存由 `gpu_memory_utilization`（默认 0.50）控制；
 - 训练与 rollout 不同时占用全部资源（hybrid engine 在阶段切换时 offload/释放）。
 
-### 13.2 显存紧张时（按优先级）
+### 14.2 显存紧张时（按优先级）
 
-1. 降低 `rollout.n`（7→5），直接减少并发轨迹数；
-2. 降低 `gpu_memory_utilization`（0.45→0.35）；
-3. 降低 `actor.ppo_micro_batch_size_per_gpu`（2→1）、`ppo_max_token_len_per_gpu`；
+1. 降低 `rollout.n`（4→3），直接减少并发轨迹数；
+2. 降低 `gpu_memory_utilization`（0.50→0.40）；
+3. `ppo_micro_batch_size_per_gpu` 已为 1 时，再缩短 `ppo_max_token_len_per_gpu`；
 4. 缩短 `max_response_length` / `max_tool_response_length`；
 5. 开启 actor CPU offload（`actor_rollout_ref.actor` 对应 offload 项），用显存换速度。
 
-### 13.3 关键调参建议
+### 14.3 关键调参建议
 
 | 现象 | 建议 |
 |---|---|
@@ -497,7 +536,7 @@ bash scripts/eval.sh --compare outputs/eval/metrics_baseline.json outputs/eval/m
 
 ---
 
-## 十四、常见问题 FAQ
+## 十五、常见问题 FAQ
 
 **Q1：CUDA / torch 车道怎么选？**
 RTX 4090 是 Ada sm_89，用 **cu124 车道**（`--index-url https://download.pytorch.org/whl/cu124`）即可；若换 5090（Blackwell sm_120）才需 cu128（cu126 及以下不含其 kernel）。
@@ -510,20 +549,20 @@ verl main 与 sglang 0.5.20+ 已迁移到 CUDA 13 / torch 2.13+，与本工程 c
 可以，`SEARCH_BACKEND=ddg` 使用免费 DuckDuckGo（无需 key），但稳定性与召回不如付费服务，建议仅用于调试。
 
 **Q4：Judge 服务一定要单独起吗？**
-奖励函数通过 HTTP 调用 Judge，需要它常驻。Judge 不可达时 reward 会自动降级为纯规则（EM/F1 + 标题命中），
+默认使用 DeepSeek 云端 API，无需部署任何本地服务，配置好 `DEEPSEEK_API_KEY` 即可。Judge 不可达时 reward 会自动降级为纯规则（EM/F1 + 标题命中），
 训练不会中断，但证据充分度信号会变弱。
 
 **Q5：工具返回的内容会参与策略梯度吗？**
 不会。veRL 对工具返回 token 自动标 `response_mask=0`，策略梯度只在模型自己生成的 token 上计算。
 
 **Q6：如何调整并行度适配不同卡数？**
-- 6 卡（默认配置 `configs/grpo_qwen3_8b_6x4090.yaml`）：`n_gpus_per_node=6`，`rollout.tensor_model_parallel_size=2, data_parallel_size=3`，`train_batch_size=42`（24GB 显存保守档，可按显存上调至 56/84）；
+- 6 卡（默认配置 `configs/grpo_qwen3_8b_6x4090.yaml`）：`n_gpus_per_node=6`，`rollout.tensor_model_parallel_size=2, data_parallel_size=3`，`train_batch_size=48`（24GB 显存保守档，可按显存上调至 56/84）；
 - 8 卡：`trainer.n_gpus_per_node=8`，可把 `rollout.data_parallel_size` 提到 4、`train_batch_size` 提到 112；
 - 2 卡：`n_gpus_per_node=2`，`rollout.tensor_model_parallel_size=2, data_parallel_size=1`，`train_batch_size=28`。
 
 ---
 
-## 十五、参考与致谢
+## 十六、参考与致谢
 
 本工程在设计与实现上借鉴了以下优秀项目（均为实际调研）：
 
